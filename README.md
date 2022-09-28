@@ -1,1 +1,1 @@
-# voter
+# aptos-voter
