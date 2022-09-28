@@ -25,7 +25,6 @@ import (
 	"fmt"
 	"github.com/polynetwork/poly/core/types"
 	"math/big"
-	"math/rand"
 	"time"
 
 	"github.com/ethereum/go-ethereum/accounts/abi/bind"
@@ -151,7 +150,7 @@ func (v *Voter) StartReplenish(ctx context.Context) {
 					if err != nil {
 						log.Errorf("fetchLockDepositEventByTxHash failed:%v", err)
 						//change endpoint and retry, mutex is not used
-						v.idx = randIdx(len(v.clients))
+						v.changeEndpoint()
 						continue
 					}
 				}
@@ -393,7 +392,4 @@ func (v *Voter) changeEndpoint() {
 
 func sleep() {
 	time.Sleep(time.Second)
-}
-func randIdx(size int) int {
-	return int(rand.Uint32()) % size
 }
