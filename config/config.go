@@ -42,10 +42,11 @@ type PolyConfig struct {
 }
 
 type SideConfig struct {
-	SideChainId uint64
-	RestURL     []string
-	CcmEventKey string
-	Batch       uint64
+	SideChainId            uint64
+	RestURL                []string
+	CcmEventAddress        string
+	CcmEventCreationNumber string
+	Batch                  uint64
 }
 
 type ForceConfig struct {
