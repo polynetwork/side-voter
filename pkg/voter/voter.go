@@ -170,6 +170,7 @@ func (v *Voter) StartVoter(ctx context.Context) {
 				if enentNum == 0 {
 					break
 				}
+				log.Infof("lastSequence", lastSequence, "nextSequence", nextSequence)
 				if lastSequence > nextSequence {
 					nextSequence = lastSequence
 					err = v.bdb.UpdateSideSequence(nextSequence)
@@ -226,7 +227,7 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 			}
 			rawData, err := hex.DecodeString(raw_data.(string)[2:])
 			if err != nil {
-				log.Errorf("rawdata DecodeString err: %v, version: %s, eventsequence: %s", err, event.Version, event.SequenceNumber)
+				log.Errorf("rawdata DecodeString rawData err: %v, version: %s, eventsequence: %s", err, event.Version, event.SequenceNumber)
 				continue
 			}
 
@@ -250,7 +251,19 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 				log.Errorf("tx version err: %v, version: %s, txid: %v", err, event.Version, hex.EncodeToString(param.CrossChainID))
 				continue
 			}
-			txHash, err := v.commitVote(uint32(version), rawData, param.CrossChainID)
+
+			tx_id, ok := event.Data["tx_id"]
+			if !ok {
+				log.Errorf("no tx_id in event.Data, version: %s, eventsequence: %s", event.Version, event.SequenceNumber)
+				continue
+			}
+
+			txId, err := hex.DecodeString(tx_id.(string)[2:])
+			if err != nil {
+				log.Errorf("rawdata DecodeString txId err: %v, version: %s, eventsequence: %s", err, event.Version, event.SequenceNumber)
+				continue
+			}
+			txHash, err := v.commitVote(uint32(version), rawData, txId)
 			if err != nil {
 				log.Errorf("commitVote failed:%v, version: %s, txid: %v", err, event.Version, hex.EncodeToString(param.CrossChainID))
 				return len(events), uint64(nowSequence), err
