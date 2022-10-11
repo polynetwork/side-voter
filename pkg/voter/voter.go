@@ -213,8 +213,10 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 
 	for _, event := range events {
 		nowSequence, _ := strconv.Atoi(event.SequenceNumber)
-		if strings.EqualFold(strings.TrimPrefix(event.GUID.AccountAddress, "0x"), strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")); strings.EqualFold(event.GUID.CreationNumber, v.conf.SideConfig.CcmEventCreationNumber) &&
-			nowSequence >= int(nextSequence) {
+		if strings.EqualFold(strings.TrimPrefix(event.GUID.AccountAddress, "0x"), strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")) &&
+			strings.EqualFold(event.GUID.CreationNumber, v.conf.SideConfig.CcmEventCreationNumber) {
+
+			nextSequence = uint64(nowSequence + 1)
 
 			param := &common2.MakeTxParam{}
 			raw_data, ok := event.Data["raw_data"]
@@ -258,7 +260,6 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 				log.Errorf("waitTx failed:%v", err)
 				return len(events), uint64(nowSequence), err
 			}
-			nextSequence = uint64(nowSequence + 1)
 		}
 	}
 	log.Infof("side event nextSequence: %d", nextSequence)
