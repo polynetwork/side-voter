@@ -160,28 +160,30 @@ func (v *Voter) StartVoter(ctx context.Context) {
 					return
 				default:
 				}
-				enentNum, lastSequence, err := v.fetchLockDepositEvents(ctx, nextSequence)
+				log.Infof("next aptos event sequence:%d", nextSequence)
+				log.CheckRotateLogFile()
+				enentsNum, lastSequence, err := v.fetchLockDepositEvents(ctx, nextSequence)
 				if err != nil {
 					log.Errorf("fetchLockDepositEvents failed:%v", err)
 					v.changeEndpoint()
 					sleep()
 					continue
 				}
-				if enentNum == 0 {
+				if enentsNum == 0 {
 					break
 				}
-				log.Infof("lastSequence", lastSequence, "nextSequence", nextSequence)
+				log.Infof("aptos lastSequence: %v, nextSequence: %v", lastSequence, nextSequence)
 				if lastSequence > nextSequence {
 					nextSequence = lastSequence
 					err = v.bdb.UpdateSideSequence(nextSequence)
 					if err != nil {
 						log.Errorf("UpdateSideSequence failed:%v", err)
 					}
+					if enentsNum == int(v.conf.SideConfig.Batch) {
+						continue
+					}
 				}
 
-				if enentNum == int(v.conf.SideConfig.Batch) {
-					continue
-				}
 				break
 
 			}
@@ -199,11 +201,10 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 	query["start"] = nextSequence
 	events, err := v.clients[v.idx].GetEventsByCreationNumber(ctx, v.conf.SideConfig.CcmEventAddress, v.conf.SideConfig.CcmEventCreationNumber, query)
 	if err != nil {
-		log.Errorf("aptos GetEventsByCreatioNumber failed:%v", err)
-		v.changeEndpoint()
-		sleep()
+		log.Errorf("aptos GetEventsByCreatioNumber failed: %v", err)
 		return 0, 0, err
 	}
+	log.Infof("aptos GetEventsByCreationNumber start: %v, limit: %v, len(events): %v", nextSequence, v.conf.SideConfig.Batch, len(events))
 	if len(events) == 0 {
 		return 0, 0, nil
 	}
@@ -212,8 +213,6 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 		y, _ := strconv.Atoi(events[j].SequenceNumber)
 		return x < y
 	})
-	log.Infof("next aptos event sequence:%d", nextSequence)
-	log.CheckRotateLogFile()
 
 	for _, event := range events {
 		nowSequence, _ := strconv.Atoi(event.SequenceNumber)
@@ -255,18 +254,7 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 				continue
 			}
 
-			tx_id, ok := event.Data["tx_id"]
-			if !ok {
-				log.Errorf("no tx_id in event.Data, version: %s, eventsequence: %s", event.Version, event.SequenceNumber)
-				continue
-			}
-
-			txId, err := hex.DecodeString(tx_id.(string)[2:])
-			if err != nil {
-				log.Errorf("rawdata DecodeString txId err: %v, version: %s, eventsequence: %s", err, event.Version, event.SequenceNumber)
-				continue
-			}
-			txHash, err := v.commitVote(uint32(version), rawData, txId)
+			txHash, err := v.commitVote(uint32(version), rawData, param.TxHash)
 			if err != nil {
 				log.Errorf("commitVote failed:%v, version: %s, txid: %v", err, event.Version, hex.EncodeToString(param.CrossChainID))
 				return len(events), uint64(nowSequence), err
@@ -278,7 +266,6 @@ func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64)
 			}
 		}
 	}
-	log.Infof("side event nextSequence: %d", nextSequence)
 	return len(events), nextSequence, nil
 }
 
@@ -288,7 +275,8 @@ func (v *Voter) fetchLockDepositEventByTxHash(ctx context.Context, txHash string
 		return fmt.Errorf("fetchLockDepositEventByTxHash, cannot get tx: %s info, err: %s", txHash, err)
 	}
 	for _, event := range tx.Events {
-		if strings.EqualFold(strings.TrimPrefix(event.GUID.AccountAddress, "0x"), strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")) && strings.EqualFold(event.GUID.CreationNumber, v.conf.SideConfig.CcmEventCreationNumber) {
+		if strings.EqualFold(strings.TrimPrefix(event.GUID.AccountAddress, "0x"), strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")) &&
+			strings.EqualFold(event.GUID.CreationNumber, v.conf.SideConfig.CcmEventCreationNumber) {
 			param := &common2.MakeTxParam{}
 			raw_data, ok := event.Data["raw_data"]
 			if !ok {
@@ -321,7 +309,7 @@ func (v *Voter) fetchLockDepositEventByTxHash(ctx context.Context, txHash string
 				log.Errorf("tx version err: %v, txHash: %s", err, txHash)
 				continue
 			}
-			txHash, err = v.commitVote(uint32(version), rawData, param.CrossChainID)
+			txHash, err = v.commitVote(uint32(version), rawData, param.TxHash)
 			if err != nil {
 				log.Errorf("commitVote failed:%v", err)
 				continue
