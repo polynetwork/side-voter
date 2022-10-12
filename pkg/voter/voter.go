@@ -194,7 +194,10 @@ func (v *Voter) StartVoter(ctx context.Context) {
 }
 
 func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64) (int, uint64, error) {
-	events, err := v.clients[v.idx].GetEventsByCreationNumber(ctx, v.conf.SideConfig.CcmEventAddress, v.conf.SideConfig.CcmEventCreationNumber, v.conf.SideConfig.Batch, strconv.Itoa(int(nextSequence)))
+	query := make(map[string]interface{})
+	query["limit"] = v.conf.SideConfig.Batch
+	query["start"] = nextSequence
+	events, err := v.clients[v.idx].GetEventsByCreationNumber(ctx, v.conf.SideConfig.CcmEventAddress, v.conf.SideConfig.CcmEventCreationNumber, query)
 	if err != nil {
 		log.Errorf("aptos GetEventsByCreatioNumber failed:%v", err)
 		v.changeEndpoint()
