@@ -183,6 +183,7 @@ func (v *Voter) StartVoter(ctx context.Context) {
 			for nextSideHeight < height-v.conf.SideConfig.BlocksToWait-v.conf.SideConfig.Batch-1 {
 				select {
 				case <-ctx.Done():
+					v.bdb.Close()
 					return
 				default:
 				}
@@ -203,6 +204,7 @@ func (v *Voter) StartVoter(ctx context.Context) {
 			}
 
 		case <-ctx.Done():
+			v.bdb.Close()
 			log.Info("quiting from signal...")
 			return
 		}
