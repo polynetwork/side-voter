@@ -23,11 +23,13 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
+	"github.com/ethereum/go-ethereum"
+	"github.com/ethereum/go-ethereum/accounts/abi"
 	"github.com/polynetwork/poly/core/types"
 	"math/big"
+	"strings"
 	"time"
 
-	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	ethcommon "github.com/ethereum/go-ethereum/common"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/polynetwork/eth-contracts/go_abi/eccm_abi"
@@ -41,14 +43,15 @@ import (
 )
 
 type Voter struct {
-	polySdk      *sdk.PolySdk
-	signer       *sdk.Account
-	conf         *config.Config
-	clients      []*ethclient.Client
-	bdb          *db.BoltDB
-	contracts    []*eccm_abi.EthCrossChainManager
-	contractAddr ethcommon.Address
-	idx          int
+	polySdk           *sdk.PolySdk
+	signer            *sdk.Account
+	conf              *config.Config
+	clients           []*ethclient.Client
+	bdb               *db.BoltDB
+	contracts         []*eccm_abi.EthCrossChainManager
+	contractAddr      ethcommon.Address
+	crossChainTopicID ethcommon.Hash
+	idx               int
 }
 
 func New(polySdk *sdk.PolySdk, signer *sdk.Account, conf *config.Config) *Voter {
@@ -75,6 +78,16 @@ func (v *Voter) Init() (err error) {
 	v.bdb = bdb
 
 	v.contractAddr = ethcommon.HexToAddress(v.conf.SideConfig.ECCMContractAddress)
+	ethCrossChainManagerAbiParsed, err := abi.JSON(strings.NewReader(eccm_abi.EthCrossChainManagerABI))
+	if err != nil {
+		return
+	}
+	if event, ok := ethCrossChainManagerAbiParsed.Events["CrossChainEvent"]; !ok {
+		return fmt.Errorf("CrossChainEvent no tin ethCrossChainManagerAbiParsed.Events")
+	} else {
+		v.crossChainTopicID = event.ID
+	}
+
 	v.contracts = make([]*eccm_abi.EthCrossChainManager, len(clients))
 	for i := 0; i < len(v.clients); i++ {
 		contract, err := eccm_abi.NewEthCrossChainManager(v.contractAddr, v.clients[i])
@@ -165,6 +178,10 @@ func (v *Voter) StartVoter(ctx context.Context) {
 	if v.conf.ForceConfig.SideHeight > 0 {
 		nextSideHeight = v.conf.ForceConfig.SideHeight
 	}
+	var batchLength uint64 = 1
+	if v.conf.SideConfig.Batch > 0 {
+		batchLength = v.conf.SideConfig.Batch
+	}
 	ticker := time.NewTicker(time.Second * 2)
 	for {
 		select {
@@ -176,11 +193,11 @@ func (v *Voter) StartVoter(ctx context.Context) {
 				continue
 			}
 			log.Infof("current side height:%d", height)
-			if height < nextSideHeight+v.conf.SideConfig.BlocksToWait+v.conf.SideConfig.Batch+1 {
+			if height < nextSideHeight+v.conf.SideConfig.BlocksToWait+1 {
 				continue
 			}
 
-			for nextSideHeight < height-v.conf.SideConfig.BlocksToWait-v.conf.SideConfig.Batch-1 {
+			for nextSideHeight < height-v.conf.SideConfig.BlocksToWait-1 {
 				select {
 				case <-ctx.Done():
 					v.bdb.Close()
@@ -188,14 +205,18 @@ func (v *Voter) StartVoter(ctx context.Context) {
 				default:
 				}
 				log.Infof("handling side height:%d", nextSideHeight)
-				err = v.fetchLockDepositEvents(nextSideHeight)
+				endSideHeight := nextSideHeight + batchLength - 1
+				if endSideHeight > height-v.conf.SideConfig.BlocksToWait-1 {
+					endSideHeight = height - v.conf.SideConfig.BlocksToWait - 1
+				}
+				lastSideHeight, err := v.fetchLockDepositEvents(nextSideHeight, endSideHeight)
 				if err != nil {
 					log.Errorf("fetchLockDepositEvents failed:%v", err)
 					v.changeEndpoint()
 					sleep()
 					continue
 				}
-				nextSideHeight = nextSideHeight + v.conf.SideConfig.Batch + 1
+				nextSideHeight = lastSideHeight
 			}
 
 			err = v.bdb.UpdateSideHeight(nextSideHeight)
@@ -282,39 +303,42 @@ func (v *Voter) fetchLockDepositEventByTxHash(txHash string) error {
 	return nil
 }
 
-func (v *Voter) fetchLockDepositEvents(height uint64) error {
-	contract := v.contracts[v.idx]
-	end := height + v.conf.SideConfig.Batch
-	opt := &bind.FilterOpts{
-		Start:   height,
-		End:     &end,
-		Context: context.Background(),
-	}
-	events, err := contract.FilterCrossChainEvent(opt, nil)
+func (v *Voter) fetchLockDepositEvents(startHeight, endHeight uint64) (uint64, error) {
+	filterContracts := []ethcommon.Address{v.contractAddr}
+	topics := [][]ethcommon.Hash{{v.crossChainTopicID}}
+	eventLogs, err := v.clients[v.idx].FilterLogs(context.Background(), ethereum.FilterQuery{FromBlock: big.NewInt(int64(startHeight)), ToBlock: big.NewInt(int64(endHeight)), Addresses: filterContracts, Topics: topics})
 	if err != nil {
-		return err
+		log.Errorf("fetchLockDepositEvents FilterLogs err:%v", err)
+		return startHeight, err
 	}
-
-	empty := true
-	for events.Next() {
-		evt := events.Event
+	if len(eventLogs) == 0 {
+		log.Infof("fetchLockDepositEvents empty start: %v, end: %v", startHeight, endHeight)
+		return endHeight + 1, nil
+	}
+	for _, eventLog := range eventLogs {
+		height := eventLog.BlockNumber
+		ethTxHash := eventLog.TxHash.String()
+		evt, err := v.contracts[v.idx].ParseCrossChainEvent(eventLog)
+		if err != nil {
+			log.Errorf("fetchLockDepositEvents ParseCrossChainEvent err: %v, height: %v, ethTxHash: %v", err, height, ethTxHash)
+			continue
+		}
 		if evt.Raw.Address != v.contractAddr {
-			log.Errorf("event source contract invalid: %s, expect: %s, height: %d", evt.Raw.Address.Hex(), v.contractAddr.Hex(), height)
+			log.Errorf("event source contract invalid: %s, expect: %s, height: %d, ethTxHash: %v", evt.Raw.Address.Hex(), v.contractAddr.Hex(), height, ethTxHash)
 			continue
 		}
 		param := &common2.MakeTxParam{}
 		_ = param.Deserialization(common.NewZeroCopySource([]byte(evt.Rawdata)))
 		if !v.conf.IsWhitelistMethod(param.Method) {
-			log.Errorf("target contract method invalid %s, height: %d", param.Method, height)
+			log.Errorf("target contract method invalid %s, height: %d, ethTxHash: %v", param.Method, height, ethTxHash)
 			continue
 		}
 
-		empty = false
 		raw, _ := v.polySdk.GetStorage(autils.CrossChainManagerContractAddress.ToHexString(),
 			append(append([]byte(common2.DONE_TX), autils.GetUint64Bytes(v.conf.SideConfig.SideChainId)...), param.CrossChainID...))
 		if len(raw) != 0 {
-			log.Infof("fetchLockDepositEvents - ccid %s (tx_hash: %s) already on poly",
-				hex.EncodeToString(param.CrossChainID), evt.Raw.TxHash.Hex())
+			log.Infof("fetchLockDepositEvents - ccid %s (tx_hash: %s) height: %v already on poly",
+				hex.EncodeToString(param.CrossChainID), ethTxHash, height)
 			continue
 		}
 
@@ -331,19 +355,17 @@ func (v *Voter) fetchLockDepositEvents(height uint64) error {
 		var txHash string
 		txHash, err = v.commitVote(uint32(height), crossTx.value, crossTx.txId)
 		if err != nil {
-			log.Errorf("commitVote failed:%v", err)
-			return err
+			log.Errorf("commitVote failed:%v, height: %d, ethTxHash: %v", err, height, ethTxHash)
+			return height, err
 		}
 		err = v.waitTx(txHash)
 		if err != nil {
-			log.Errorf("waitTx failed:%v", err)
-			return err
+			log.Errorf("waitTx failed:%v,height: %d, ethTxHash: %v", err, height, ethTxHash)
+			return height, err
 		}
+		log.Infof("success side height %d ethTxhash: %v", height, ethTxHash)
 	}
-
-	log.Infof("side height %d empty: %v", height, empty)
-
-	return nil
+	return endHeight + 1, nil
 }
 
 func (v *Voter) commitVote(height uint32, value []byte, txhash []byte) (string, error) {
