@@ -304,6 +304,7 @@ func (v *Voter) fetchLockDepositEventByTxHash(txHash string) error {
 }
 
 func (v *Voter) fetchLockDepositEvents(startHeight, endHeight uint64) (uint64, error) {
+	log.Infof("fetchLockDepositEvents......  start: %v, end: %v", startHeight, endHeight)
 	filterContracts := []ethcommon.Address{v.contractAddr}
 	topics := [][]ethcommon.Hash{{v.crossChainTopicID}}
 	eventLogs, err := v.clients[v.idx].FilterLogs(context.Background(), ethereum.FilterQuery{FromBlock: big.NewInt(int64(startHeight)), ToBlock: big.NewInt(int64(endHeight)), Addresses: filterContracts, Topics: topics})
