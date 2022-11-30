@@ -324,8 +324,8 @@ func (v *Voter) fetchLockDepositEvents(startHeight, endHeight uint64) (uint64, e
 			log.Errorf("fetchLockDepositEvents ParseCrossChainEvent err: %v, height: %v, ethTxHash: %v", err, height, ethTxHash)
 			continue
 		}
-		if evt.Raw.Address != v.contractAddr {
-			log.Errorf("event source contract invalid: %s, expect: %s, height: %d, ethTxHash: %v", evt.Raw.Address.Hex(), v.contractAddr.Hex(), height, ethTxHash)
+		if eventLog.Address != v.contractAddr {
+			log.Errorf("event source contract invalid: %s, expect: %s, height: %d, ethTxHash: %v", eventLog.Address.Hex(), v.contractAddr.Hex(), height, ethTxHash)
 			continue
 		}
 		param := &common2.MakeTxParam{}
@@ -347,7 +347,7 @@ func (v *Voter) fetchLockDepositEvents(startHeight, endHeight uint64) (uint64, e
 		index.SetBytes(evt.TxId)
 		crossTx := &CrossTransfer{
 			txIndex: encodeBigInt(index),
-			txId:    evt.Raw.TxHash.Bytes(),
+			txId:    eventLog.TxHash.Bytes(),
 			toChain: uint32(evt.ToChainId),
 			value:   []byte(evt.Rawdata),
 			height:  height,
