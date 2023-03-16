@@ -25,6 +25,7 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
 	"github.com/polynetwork/poly/core/types"
 	"math/big"
 	"strings"
@@ -37,6 +38,7 @@ import (
 	"github.com/polynetwork/poly/common"
 	common2 "github.com/polynetwork/poly/native/service/cross_chain_manager/common"
 	autils "github.com/polynetwork/poly/native/service/utils"
+	zkabi "github.com/polynetwork/side-voter/abi"
 	"github.com/polynetwork/side-voter/config"
 	"github.com/polynetwork/side-voter/pkg/db"
 	"github.com/polynetwork/side-voter/pkg/log"
@@ -52,6 +54,7 @@ type Voter struct {
 	contractAddr      ethcommon.Address
 	crossChainTopicID ethcommon.Hash
 	idx               int
+	l1                *zkabi.IGetters
 }
 
 func New(polySdk *sdk.PolySdk, signer *sdk.Account, conf *config.Config) *Voter {
@@ -96,6 +99,16 @@ func (v *Voter) Init() (err error) {
 		}
 		v.contracts[i] = contract
 	}
+
+	c, err := ethclient.Dial(v.conf.SideConfig.L1URL)
+	if err != nil {
+		return
+	}
+	if len(v.conf.SideConfig.L1Contract) == 0 {
+		err = fmt.Errorf("l1 contract not specified")
+		return
+	}
+	v.l1, err = zkabi.NewIGetters(ethcommon.HexToAddress(v.conf.SideConfig.L1Contract), c)
 
 	return
 }
@@ -192,12 +205,53 @@ func (v *Voter) StartVoter(ctx context.Context) {
 				v.changeEndpoint()
 				continue
 			}
-			log.Infof("current side height:%d", height)
-			if height < nextSideHeight+v.conf.SideConfig.BlocksToWait+1 {
+			log.Infof("side latest height:%d", height)
+
+			ethHeight, _, err := ethGetCurrentHeight2(v.conf.SideConfig.L1URL, "finalized")
+			if err != nil {
+				log.Errorf("get eth height failed:%v", err)
+				continue
+			}
+			if ethHeight.Uint64() == 0 {
+				log.Errorf("get eth finalized height failed. eth height=%d", ethHeight.Uint64())
 				continue
 			}
 
-			for nextSideHeight < height-v.conf.SideConfig.BlocksToWait-1 {
+			ethL1BatchNumber, err := v.getEthL1BatchNumber(ethHeight.Int64())
+			if err != nil {
+				log.Errorf("getEthL1BatchNumber failed. height:%d, err:%v", ethHeight.Int64(), err)
+				continue
+			}
+			log.Infof("eth height: %d, ethL1BatchNumber: %d", ethHeight.Int64(), ethL1BatchNumber)
+
+			zkL1BatchNumber, err := getZkL1BatchNumber(v.conf.SideConfig.RestURL[v.idx], nextSideHeight)
+			if err != nil {
+				log.Errorf("getZkL1BatchNumber failed. height:%d, err:%v", nextSideHeight, err)
+				v.changeEndpoint()
+				continue
+			}
+
+			if zkL1BatchNumber.Uint64() == 0 {
+				log.Infof("zk height: %d not submitted to L1", nextSideHeight)
+				continue
+			} else {
+				log.Infof("zk height: %d, zkL1BatchNumber: %d", nextSideHeight, zkL1BatchNumber.Uint64())
+			}
+
+			if ethL1BatchNumber < zkL1BatchNumber.Uint64() {
+				log.Infof("zk height: %d not confirmed on L1", nextSideHeight)
+				continue
+			}
+
+			zkL1LatestConfirmedHeight, err := getZkL1LatestConfirmedHeight(v.conf.SideConfig.RestURL[v.idx], nextSideHeight, ethL1BatchNumber)
+			if err != nil {
+				log.Errorf("getZkL1LatestConfirmedHeight failed:%v", err)
+				v.changeEndpoint()
+				continue
+			}
+			log.Infof("side latest confirmed height:%d", zkL1LatestConfirmedHeight)
+
+			for nextSideHeight < zkL1LatestConfirmedHeight-1 {
 				select {
 				case <-ctx.Done():
 					v.bdb.Close()
@@ -206,8 +260,8 @@ func (v *Voter) StartVoter(ctx context.Context) {
 				}
 				log.Infof("handling side height:%d", nextSideHeight)
 				endSideHeight := nextSideHeight + batchLength - 1
-				if endSideHeight > height-v.conf.SideConfig.BlocksToWait-1 {
-					endSideHeight = height - v.conf.SideConfig.BlocksToWait - 1
+				if endSideHeight > zkL1LatestConfirmedHeight {
+					endSideHeight = zkL1LatestConfirmedHeight
 				}
 				lastSideHeight, err := v.fetchLockDepositEvents(nextSideHeight, endSideHeight)
 				if err != nil {
@@ -252,12 +306,33 @@ func (v *Voter) fetchLockDepositEventByTxHash(txHash string) error {
 		return err
 	}
 	height := reciept.BlockNumber.Uint64()
-	latestHeight, err := ethGetCurrentHeight(v.conf.SideConfig.RestURL[v.idx])
+
+	ethHeight, _, err := ethGetCurrentHeight2(v.conf.SideConfig.L1URL, "finalized")
 	if err != nil {
-		return err
+		return fmt.Errorf("get eth height failed:%v", err)
 	}
-	if height+v.conf.SideConfig.BlocksToWait > latestHeight {
-		return fmt.Errorf("transaction is not confirmed yet %s", txHash)
+	if ethHeight.Uint64() == 0 {
+		return fmt.Errorf("get eth finalized height failed. eth height=%d", ethHeight.Uint64())
+	}
+	ethL1BatchNumber, err := v.getEthL1BatchNumber(ethHeight.Int64())
+	if err != nil {
+		return fmt.Errorf("getEthL1BatchNumber failed. height:%d, err:%v", ethHeight.Int64(), err)
+	}
+	log.Infof("eth height: %d, ethL1BatchNumber: %d", ethHeight.Int64(), ethL1BatchNumber)
+
+	zkL1BatchNumber, err := getZkL1BatchNumber(v.conf.SideConfig.RestURL[v.idx], height)
+	if err != nil {
+		return fmt.Errorf("getZkL1BatchNumber failed. height:%d, err:%v", height, err)
+	}
+
+	if zkL1BatchNumber.Uint64() == 0 {
+		return fmt.Errorf("zk hash:%s height:%d not submitted to L1", txHash, height)
+	} else {
+		log.Infof("zk hash:%s height:%d, zkL1BatchNumber: %d", txHash, height, zkL1BatchNumber.Uint64())
+	}
+
+	if ethL1BatchNumber < zkL1BatchNumber.Uint64() {
+		return fmt.Errorf("zk hash:%s height:%d not confirmed on L1", txHash, height)
 	}
 
 	for _, l := range reciept.Logs {
@@ -403,6 +478,30 @@ func (v *Voter) waitTx(txHash string) (err error) {
 		}
 		return
 	}
+}
+
+func (v *Voter) getEthL1BatchNumber(height int64) (uint64, error) {
+	//latest, _, err := ethGetCurrentHeight2(v.conf.SideConfig.L1URL, "finalized")
+	//if err != nil {
+	//	return 0, err
+	//}
+	//log.Infof("eth latest height:%d", latest.Uint64())
+	//
+	//if latest.Uint64() == 0 {
+	//	log.Errorf("get eth finalized height failed. eth height=%d", latest.Uint64())
+	//	return 0, fmt.Errorf("get eth finalized height failed. eth height=%d", latest.Uint64())
+	//}
+	//
+	//h := latest.Uint64() - v.conf.SideConfig.BlocksToWait
+	//if h >= latest.Uint64() {
+	//	return 0, fmt.Errorf("ethGetCurrentHeight2 failed. eth height=%d, h=%d", latest.Uint64(), h)
+	//}
+	n, err := v.l1.GetTotalBlocksExecuted(&bind.CallOpts{BlockNumber: big.NewInt(height)})
+	if err != nil {
+		return 0, err
+	}
+	return uint64(n), nil
+
 }
 
 //change endpoint and retry, mutex is not used
