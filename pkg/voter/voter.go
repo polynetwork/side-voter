@@ -251,7 +251,7 @@ func (v *Voter) StartVoter(ctx context.Context) {
 			}
 			log.Infof("side latest confirmed height:%d", zkL1LatestConfirmedHeight)
 
-			for nextSideHeight < zkL1LatestConfirmedHeight-1 {
+			for nextSideHeight <= zkL1LatestConfirmedHeight {
 				select {
 				case <-ctx.Done():
 					v.bdb.Close()

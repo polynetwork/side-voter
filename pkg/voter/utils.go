@@ -130,7 +130,8 @@ func getZkL1LatestConfirmedHeight(url string, nextHeight uint64, ethL1BatchNum u
 	for {
 		zkL1BatchNumber, err := getZkL1BatchNumber(url, confirmedHeight)
 		if err != nil {
-			return 0, err
+			log.Errorf("getZkL1BatchNumber failed. height:%d, err:%v", confirmedHeight, err)
+			return confirmedHeight - 1, nil
 		}
 		if zkL1BatchNumber.Uint64() == 0 {
 			break
