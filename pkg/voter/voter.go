@@ -481,21 +481,6 @@ func (v *Voter) waitTx(txHash string) (err error) {
 }
 
 func (v *Voter) getEthL1BatchNumber(height int64) (uint64, error) {
-	//latest, _, err := ethGetCurrentHeight2(v.conf.SideConfig.L1URL, "finalized")
-	//if err != nil {
-	//	return 0, err
-	//}
-	//log.Infof("eth latest height:%d", latest.Uint64())
-	//
-	//if latest.Uint64() == 0 {
-	//	log.Errorf("get eth finalized height failed. eth height=%d", latest.Uint64())
-	//	return 0, fmt.Errorf("get eth finalized height failed. eth height=%d", latest.Uint64())
-	//}
-	//
-	//h := latest.Uint64() - v.conf.SideConfig.BlocksToWait
-	//if h >= latest.Uint64() {
-	//	return 0, fmt.Errorf("ethGetCurrentHeight2 failed. eth height=%d, h=%d", latest.Uint64(), h)
-	//}
 	n, err := v.l1.GetTotalBlocksExecuted(&bind.CallOpts{BlockNumber: big.NewInt(height)})
 	if err != nil {
 		return 0, err
