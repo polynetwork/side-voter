@@ -58,11 +58,14 @@ type SideConfig struct {
 	RestURL             []string
 	BlocksToWait        uint64
 	Batch               uint64
+	L1URL               []string
+	L1ContractAddress   string
 }
 
 type ForceConfig struct {
 	SideHeight uint64
 	PolyHeight uint64
+	L1Batch    uint64
 }
 
 func LoadConfig(confFile string) (config *Config, err error) {

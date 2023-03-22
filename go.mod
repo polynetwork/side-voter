@@ -9,6 +9,7 @@ require (
 	github.com/polynetwork/eth-contracts v0.0.0-20200814062128-70f58e22b014
 	github.com/polynetwork/poly v1.8.3
 	github.com/polynetwork/poly-go-sdk v0.0.0-20210114120411-3dcba035134f
+	github.com/polynetwork/polygonZK-sdk v0.0.0
 )
 
 require (
@@ -111,4 +112,7 @@ require (
 	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c // indirect
 )
 
-replace github.com/tendermint/tm-db/064 => github.com/tendermint/tm-db v0.6.4
+replace (
+	github.com/polynetwork/polygonZK-sdk v0.0.0 => github.com/rain-zxn/polygonZK-sdk v0.0.0-20230321073053-d5261d77814f
+	github.com/tendermint/tm-db/064 => github.com/tendermint/tm-db v0.6.4
+)

@@ -25,33 +25,51 @@ import (
 	"fmt"
 	"github.com/ethereum/go-ethereum"
 	"github.com/ethereum/go-ethereum/accounts/abi"
+	"github.com/ethereum/go-ethereum/accounts/abi/bind"
+	"github.com/ethereum/go-ethereum/rpc"
 	"github.com/polynetwork/poly/core/types"
 	"math/big"
 	"strings"
+	"sync"
 	"time"
 
 	ethcommon "github.com/ethereum/go-ethereum/common"
+	ethtypes "github.com/ethereum/go-ethereum/core/types"
 	"github.com/ethereum/go-ethereum/ethclient"
 	"github.com/polynetwork/eth-contracts/go_abi/eccm_abi"
 	sdk "github.com/polynetwork/poly-go-sdk"
 	"github.com/polynetwork/poly/common"
 	common2 "github.com/polynetwork/poly/native/service/cross_chain_manager/common"
 	autils "github.com/polynetwork/poly/native/service/utils"
+	polygonZk "github.com/polynetwork/polygonZK-sdk/client"
 	"github.com/polynetwork/side-voter/config"
 	"github.com/polynetwork/side-voter/pkg/db"
 	"github.com/polynetwork/side-voter/pkg/log"
+	"github.com/polynetwork/side-voter/polygon_zk_abi"
 )
+
+type PolygonZkClient struct {
+	EthClient *ethclient.Client
+	RpcClient *polygonZk.Client
+}
 
 type Voter struct {
 	polySdk           *sdk.PolySdk
 	signer            *sdk.Account
 	conf              *config.Config
-	clients           []*ethclient.Client
 	bdb               *db.BoltDB
+	clients           []*PolygonZkClient
 	contracts         []*eccm_abi.EthCrossChainManager
 	contractAddr      ethcommon.Address
 	crossChainTopicID ethcommon.Hash
 	idx               int
+
+	l1clients      []*rpc.Client
+	l1contracts    []*polygon_zk_abi.PolygonZkAbiCaller
+	l1contractAddr ethcommon.Address
+	l1idx          int
+
+	sync.Mutex
 }
 
 func New(polySdk *sdk.PolySdk, signer *sdk.Account, conf *config.Config) *Voter {
@@ -59,14 +77,17 @@ func New(polySdk *sdk.PolySdk, signer *sdk.Account, conf *config.Config) *Voter 
 }
 
 func (v *Voter) Init() (err error) {
-	var clients []*ethclient.Client
+	clients := make([]*PolygonZkClient, 0)
 	for _, node := range v.conf.SideConfig.RestURL {
-		client, err := ethclient.Dial(node)
+		ethClient, err := ethclient.Dial(node)
 		if err != nil {
 			log.Fatalf("ethclient.Dial failed:%v", err)
 		}
-
-		clients = append(clients, client)
+		rpcClient, err := polygonZk.NewPolygonZkClient(node)
+		if err != nil {
+			log.Fatalf("rpc.Dial failed:%v", err)
+		}
+		clients = append(clients, &PolygonZkClient{ethClient, rpcClient})
 	}
 	v.clients = clients
 
@@ -90,19 +111,42 @@ func (v *Voter) Init() (err error) {
 
 	v.contracts = make([]*eccm_abi.EthCrossChainManager, len(clients))
 	for i := 0; i < len(v.clients); i++ {
-		contract, err := eccm_abi.NewEthCrossChainManager(v.contractAddr, v.clients[i])
+		contract, err := eccm_abi.NewEthCrossChainManager(v.contractAddr, v.clients[i].EthClient)
 		if err != nil {
 			return err
 		}
 		v.contracts[i] = contract
 	}
 
+	v.l1contractAddr = ethcommon.HexToAddress(v.conf.SideConfig.L1ContractAddress)
+	l1clients := make([]*rpc.Client, 0)
+	l1contracts := make([]*polygon_zk_abi.PolygonZkAbiCaller, 0)
+	for _, node := range v.conf.SideConfig.L1URL {
+		ethClient, err := ethclient.Dial(node)
+		if err != nil {
+			log.Fatalf("ethclient.Dial l1 failed:%v", err)
+		}
+		contract, err := polygon_zk_abi.NewPolygonZkAbiCaller(v.l1contractAddr, ethClient)
+		if err != nil {
+			log.Fatalf("NewZKEthAbiCaller l1 failed:%v", err)
+		}
+		rpcClient, err := rpc.Dial(node)
+		if err != nil {
+			log.Fatalf("rpc.Dial l1 failed:%v", err)
+		}
+
+		l1contracts = append(l1contracts, contract)
+		l1clients = append(l1clients, rpcClient)
+	}
+	v.l1clients = l1clients
+	v.l1contracts = l1contracts
+
 	return
 }
 
 func (v *Voter) StartReplenish(ctx context.Context) {
 	var nextPolyHeight uint64
-	if v.conf.ForceConfig.PolyHeight != 0 {
+	if v.conf.ForceConfig.PolyHeight > 0 {
 		nextPolyHeight = v.conf.ForceConfig.PolyHeight
 	} else {
 		h, err := v.polySdk.GetCurrentBlockHeight()
@@ -158,11 +202,18 @@ func (v *Voter) StartReplenish(ctx context.Context) {
 					}
 				}
 
+				l1Batch, _, err := v.getL1FinalizedBatch(ctx)
+				if err != nil {
+					log.Error("replenish getL1FinalizedBatch err", err)
+					v.changeL1Endpoint()
+					continue
+				}
+
 				for _, txHash := range txHashList {
-					err = v.fetchLockDepositEventByTxHash(txHash.(string))
+					err = v.fetchLockDepositEventByTxHash(txHash.(string), l1Batch)
 					if err != nil {
 						log.Errorf("fetchLockDepositEventByTxHash failed:%v", err)
-						//change endpoint and retry, mutex is not used
+						//change endpoint and retry
 						v.changeEndpoint()
 						continue
 					}
@@ -178,21 +229,48 @@ func (v *Voter) StartVoter(ctx context.Context) {
 	if v.conf.ForceConfig.SideHeight > 0 {
 		nextSideHeight = v.conf.ForceConfig.SideHeight
 	}
+	nextL1Batch := v.bdb.GetL1Batch()
+	if v.conf.ForceConfig.L1Batch > 0 {
+		nextL1Batch = v.conf.ForceConfig.L1Batch
+	}
 	var batchLength uint64 = 1
 	if v.conf.SideConfig.Batch > 0 {
 		batchLength = v.conf.SideConfig.Batch
 	}
-	ticker := time.NewTicker(time.Second * 2)
+	ticker := time.NewTicker(time.Second * 12)
 	for {
 		select {
 		case <-ticker.C:
-			height, err := ethGetCurrentHeight(v.conf.SideConfig.RestURL[v.idx])
+			l1Batch, l1Height, err := v.getL1FinalizedBatch(ctx)
 			if err != nil {
-				log.Errorf("ethGetCurrentHeight failed:%v", err)
+				log.Error("getL1FinalizedBatch err", err)
+				v.changeL1Endpoint()
+				continue
+			}
+			log.Infof("l1Batch: %v, l1Height: %v, nextL1Batch: %v", l1Batch, l1Height, nextL1Batch)
+			if l1Batch < nextL1Batch {
+				continue
+			}
+			txHash, err := v.getZkLatestBatchTx(l1Batch, nextL1Batch)
+			if err != nil {
+				log.Error("getZkLatestBatchTx err", err)
 				v.changeEndpoint()
 				continue
 			}
-			log.Infof("current side height:%d", height)
+			if txHash == (ethcommon.Hash{}) {
+				log.Infof("l1 batch [%v,%v] tx is empty", nextL1Batch, l1Batch)
+				nextL1Batch = l1Batch + 1
+				err = v.bdb.UpdateL1Batch(nextL1Batch)
+				if err != nil {
+					log.Errorf("UpdateL1Batch failed:%v", err)
+				}
+				continue
+			}
+			receipt, err := v.clients[v.idx].EthClient.TransactionReceipt(ctx, txHash)
+			if err != nil {
+				log.Errorf("TransactionReceipt err, txHash: %v, err: %v", txHash, err)
+			}
+			height := receipt.BlockNumber.Uint64()
 			if height < nextSideHeight+v.conf.SideConfig.BlocksToWait+1 {
 				continue
 			}
@@ -232,6 +310,32 @@ func (v *Voter) StartVoter(ctx context.Context) {
 	}
 }
 
+func (v *Voter) getL1FinalizedBatch(ctx context.Context) (uint64, *big.Int, error) {
+	result := new(ethtypes.Header)
+	err := v.l1clients[v.l1idx].CallContext(context.Background(), result, "eth_getBlockByNumber", "finalized", false)
+	if err != nil {
+		return 0, nil, fmt.Errorf("l1 GetLastVerifiedBatch failed: %v", err)
+	}
+	l1Batch, err := v.l1contracts[v.l1idx].GetLastVerifiedBatch(&bind.CallOpts{BlockNumber: result.Number, Context: ctx})
+	if err != nil {
+		return 0, nil, fmt.Errorf("l1 GetLastVerifiedBatch failed: %v", err)
+	}
+	return l1Batch, result.Number, nil
+}
+
+func (v *Voter) getZkLatestBatchTx(l1Batch, nextL1Batch uint64) (ethcommon.Hash, error) {
+	for batch := l1Batch; batch >= nextL1Batch; batch-- {
+		rpcBatch, err := v.clients[v.idx].RpcClient.GetBatchByNumber(l1Batch)
+		if err != nil {
+			return ethcommon.Hash{}, fmt.Errorf("GetBatchByNumber failed: %v", err)
+		}
+		if len(rpcBatch.Transactions) > 0 {
+			return rpcBatch.Transactions[len(rpcBatch.Transactions)-1], nil
+		}
+	}
+	return ethcommon.Hash{}, nil
+}
+
 type CrossTransfer struct {
 	txIndex string
 	txId    []byte
@@ -240,24 +344,25 @@ type CrossTransfer struct {
 	height  uint64
 }
 
-func (v *Voter) fetchLockDepositEventByTxHash(txHash string) error {
+func (v *Voter) fetchLockDepositEventByTxHash(txHash string, l1Batch uint64) error {
 	client := v.clients[v.idx]
 	contract := v.contracts[v.idx]
 	hash := ethcommon.HexToHash(txHash)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
-	reciept, err := client.TransactionReceipt(ctx, hash)
+	reciept, err := client.EthClient.TransactionReceipt(ctx, hash)
 	if err != nil {
 		return err
 	}
 	height := reciept.BlockNumber.Uint64()
-	latestHeight, err := ethGetCurrentHeight(v.conf.SideConfig.RestURL[v.idx])
+	batchNumer, err := v.clients[v.idx].RpcClient.BatchNumberByBlockNumber(height)
 	if err != nil {
-		return err
+		return fmt.Errorf("txHash: %v BatchNumberByBlockNumber height: %v, err: %v", txHash, height, err)
 	}
-	if height+v.conf.SideConfig.BlocksToWait > latestHeight {
-		return fmt.Errorf("transaction is not confirmed yet %s", txHash)
+	if batchNumer > l1Batch {
+		log.Infof("txHash: %v, batchNumer: %v, greater than l1Batch: %v", txHash, batchNumer, l1Batch)
+		return nil
 	}
 
 	for _, l := range reciept.Logs {
@@ -294,7 +399,7 @@ func (v *Voter) fetchLockDepositEventByTxHash(txHash string) error {
 			height:  height,
 		}
 
-		txHash, err = v.commitVote(uint32(height), crossTx.value, crossTx.txId)
+		_, err = v.commitVote(uint32(height), crossTx.value, crossTx.txId)
 		if err != nil {
 			log.Errorf("commitVote failed:%v", err)
 			continue
@@ -307,7 +412,7 @@ func (v *Voter) fetchLockDepositEvents(startHeight, endHeight uint64) (uint64, e
 	log.Infof("fetchLockDepositEvents......  start: %v, end: %v", startHeight, endHeight)
 	filterContracts := []ethcommon.Address{v.contractAddr}
 	topics := [][]ethcommon.Hash{{v.crossChainTopicID}}
-	eventLogs, err := v.clients[v.idx].FilterLogs(context.Background(), ethereum.FilterQuery{FromBlock: big.NewInt(int64(startHeight)), ToBlock: big.NewInt(int64(endHeight)), Addresses: filterContracts, Topics: topics})
+	eventLogs, err := v.clients[v.idx].EthClient.FilterLogs(context.Background(), ethereum.FilterQuery{FromBlock: big.NewInt(int64(startHeight)), ToBlock: big.NewInt(int64(endHeight)), Addresses: filterContracts, Topics: topics})
 	if err != nil {
 		log.Errorf("fetchLockDepositEvents FilterLogs err:%v", err)
 		return startHeight, err
@@ -329,7 +434,7 @@ func (v *Voter) fetchLockDepositEvents(startHeight, endHeight uint64) (uint64, e
 			continue
 		}
 		param := &common2.MakeTxParam{}
-		_ = param.Deserialization(common.NewZeroCopySource([]byte(evt.Rawdata)))
+		_ = param.Deserialization(common.NewZeroCopySource(evt.Rawdata))
 		if !v.conf.IsWhitelistMethod(param.Method) {
 			log.Errorf("target contract method invalid %s, height: %d, ethTxHash: %v", param.Method, height, ethTxHash)
 			continue
@@ -349,7 +454,7 @@ func (v *Voter) fetchLockDepositEvents(startHeight, endHeight uint64) (uint64, e
 			txIndex: encodeBigInt(index),
 			txId:    eventLog.TxHash.Bytes(),
 			toChain: uint32(evt.ToChainId),
-			value:   []byte(evt.Rawdata),
+			value:   evt.Rawdata,
 			height:  height,
 		}
 
@@ -405,14 +510,27 @@ func (v *Voter) waitTx(txHash string) (err error) {
 	}
 }
 
-//change endpoint and retry, mutex is not used
+//change endpoint and retry
 func (v *Voter) changeEndpoint() {
+	v.Lock()
 	if v.idx == len(v.clients)-1 {
 		v.idx = 0
 	} else {
 		v.idx = v.idx + 1
 	}
 	log.Infof("change endpoint to %d", v.idx)
+	v.Unlock()
+}
+
+func (v *Voter) changeL1Endpoint() {
+	v.Lock()
+	if v.l1idx == len(v.l1clients)-1 {
+		v.l1idx = 0
+	} else {
+		v.l1idx = v.l1idx + 1
+	}
+	log.Infof("change l1 endpoint to %d", v.l1idx)
+	v.Unlock()
 }
 
 func sleep() {

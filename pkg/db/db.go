@@ -94,6 +94,33 @@ func (w *BoltDB) GetSideHeight() uint64 {
 	return h
 }
 
+func (w *BoltDB) UpdateL1Batch(h uint64) error {
+
+	raw := make([]byte, 8)
+	binary.LittleEndian.PutUint64(raw, h)
+
+	return w.db.Update(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(BKTHeight)
+		return bkt.Put([]byte("l1_batch"), raw)
+	})
+}
+
+func (w *BoltDB) GetL1Batch() uint64 {
+
+	var h uint64
+	_ = w.db.View(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(BKTHeight)
+		raw := bkt.Get([]byte("l1_batch"))
+		if len(raw) == 0 {
+			h = 0
+			return nil
+		}
+		h = binary.LittleEndian.Uint64(raw)
+		return nil
+	})
+	return h
+}
+
 func (w *BoltDB) Close() {
 	w.db.Close()
 }
