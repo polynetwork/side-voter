@@ -197,6 +197,9 @@ func (v *Voter) StartVoter(ctx context.Context) {
 				continue
 			}
 
+			if v.conf.SideConfig.TimeToWait > 0 {
+				time.Sleep(time.Second * time.Duration(v.conf.SideConfig.TimeToWait))
+			}
 			for nextSideHeight < height-v.conf.SideConfig.BlocksToWait-1 {
 				select {
 				case <-ctx.Done():

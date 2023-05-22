@@ -58,6 +58,7 @@ type SideConfig struct {
 	RestURL             []string
 	BlocksToWait        uint64
 	Batch               uint64
+	TimeToWait          uint64
 }
 
 type ForceConfig struct {
