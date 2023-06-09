@@ -186,7 +186,7 @@ func (v *Voter) StartVoter(ctx context.Context) {
 	for {
 		select {
 		case <-ticker.C:
-			height, err := ethGetCurrentHeight(v.conf.SideConfig.RestURL[v.idx])
+			height, err := ethGetCurrentHeight(v.conf.SideConfig.RestURL[v.idx], v.conf.SideConfig.Finalized)
 			if err != nil {
 				log.Errorf("ethGetCurrentHeight failed:%v", err)
 				v.changeEndpoint()
@@ -255,7 +255,7 @@ func (v *Voter) fetchLockDepositEventByTxHash(txHash string) error {
 		return err
 	}
 	height := reciept.BlockNumber.Uint64()
-	latestHeight, err := ethGetCurrentHeight(v.conf.SideConfig.RestURL[v.idx])
+	latestHeight, err := ethGetCurrentHeight(v.conf.SideConfig.RestURL[v.idx], v.conf.SideConfig.Finalized)
 	if err != nil {
 		return err
 	}

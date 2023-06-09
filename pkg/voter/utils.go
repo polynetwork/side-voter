@@ -22,6 +22,7 @@ package voter
 import (
 	"encoding/hex"
 	"encoding/json"
+	"fmt"
 	"io/ioutil"
 	"math/big"
 	"net/http"
@@ -42,7 +43,22 @@ type heightRep struct {
 	ID      uint   `json:"id"`
 }
 
-func ethGetCurrentHeight(url string) (height uint64, err error) {
+type headerRep struct {
+	JSONRPC string `json:"jsonrpc"`
+	Result  *struct {
+		Number string
+	}
+	ID uint `json:"id"`
+}
+
+func ethGetCurrentHeight(url string, finalized bool) (height uint64, err error) {
+	if finalized {
+		return ethGetBlockByNumberFinalized(url)
+	}
+	return ethBlockNumber(url)
+}
+
+func ethBlockNumber(url string) (height uint64, err error) {
 	req := &heightReq{
 		JSONRPC: "2.0",
 		Method:  "eth_blockNumber",
@@ -55,18 +71,47 @@ func ethGetCurrentHeight(url string) (height uint64, err error) {
 	if err != nil {
 		return
 	}
-
 	var resp heightRep
 	err = json.Unmarshal(body, &resp)
 	if err != nil {
 		return
 	}
-
 	height, err = strconv.ParseUint(resp.Result, 0, 64)
 	if err != nil {
 		return
 	}
+	return
+}
 
+func ethGetBlockByNumberFinalized(url string) (number uint64, err error) {
+	req := map[string]interface{}{
+		"jsonrpc": "2.0",
+		"method":  "eth_getBlockByNumber",
+		"params":  []interface{}{"finalized", false},
+		"id":      1,
+	}
+	data, _ := json.Marshal(req)
+	body, err := jsonRequest(url, data)
+	if err != nil {
+		return
+	}
+
+	var resp headerRep
+	err = json.Unmarshal(body, &resp)
+	if err != nil {
+		return
+	}
+	if resp.Result == nil || resp.Result.Number == "" {
+		err = fmt.Errorf("invalid response %s", string(body))
+		return
+	}
+
+	h, ok := new(big.Int).SetString(strings.TrimPrefix(resp.Result.Number, "0x"), 16)
+	if !ok {
+		err = fmt.Errorf("invalid block number")
+		return
+	}
+	number = h.Uint64()
 	return
 }
 

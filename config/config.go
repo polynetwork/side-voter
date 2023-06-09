@@ -59,6 +59,7 @@ type SideConfig struct {
 	BlocksToWait        uint64
 	Batch               uint64
 	TimeToWait          uint64
+	Finalized           bool
 }
 
 type ForceConfig struct {
