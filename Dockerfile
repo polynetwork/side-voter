@@ -5,9 +5,7 @@ ARG commit=master
 WORKDIR /workspace
 
 COPY go.mod go.sum ./
-COPY config ./
-COPY pkg ./
-COPY main.go Makefile ./
+COPY . ./
 
 RUN go mod download
 RUN make side-voter
