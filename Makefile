@@ -14,7 +14,7 @@ build: clean
 	docker build --no-cache --build-arg commit=$(COMMIT) -t go-side-voter-build .
 	docker container create --name go-side-voter-temp go-side-voter-build
 	docker container cp go-side-voter-temp:/workspace/side-voter .
-	md5sum side-voter
+	sha256sum side-voter
 
 always:
 .DELETE_ON_ERROR:
