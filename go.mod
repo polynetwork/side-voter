@@ -5,7 +5,7 @@ go 1.17
 require (
 	github.com/boltdb/bolt v1.3.1
 	github.com/howeyc/gopass v0.0.0-20190910152052-7cb4b85ec19c
-	github.com/polynetwork/aptos-go-sdk v0.0.0
+	github.com/polynetwork/aptos-go-sdk v0.0.0-20221011111543-edbdc61cb24c
 	github.com/polynetwork/poly v1.8.3
 	github.com/polynetwork/poly-go-sdk v0.0.0-20210114120411-3dcba035134f
 )
@@ -101,7 +101,4 @@ require (
 	gopkg.in/yaml.v3 v3.0.0-20200313102051-9f266ea9e77c // indirect
 )
 
-replace (
-	github.com/polynetwork/aptos-go-sdk v0.0.0 => github.com/rain-zxn/aptos-go-sdk v0.0.0-20221011111543-edbdc61cb24c
-	github.com/tendermint/tm-db/064 => github.com/tendermint/tm-db v0.6.4
-)
+replace github.com/tendermint/tm-db/064 => github.com/tendermint/tm-db v0.6.4
