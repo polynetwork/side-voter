@@ -59,6 +59,7 @@ func (v *Voter) Init() (err error) {
 	if err != nil {
 		return
 	}
+
 	v.bdb = bdb
 	var clients []suisdk.ISuiAPI
 	for _, node := range v.conf.SideConfig.RestURL {
@@ -81,6 +82,7 @@ func (v *Voter) StartReplenish(ctx context.Context) {
 		nextPolyHeight = uint64(h)
 		log.Infof("start from current poly height:%d", h)
 	}
+
 	ticker := time.NewTicker(time.Second)
 	for {
 		select {
@@ -138,6 +140,7 @@ func (v *Voter) StartReplenish(ctx context.Context) {
 				}
 				nextPolyHeight++
 			}
+
 		case <-ctx.Done():
 			log.Info("quiting from signal...")
 			return
@@ -160,12 +163,14 @@ func (v *Voter) StartVoter(ctx context.Context) {
 				log.Infof("next benfen event cursor:%s", cursor)
 				log.CheckRotateLogFile()
 				enentsNum, lastDigest, err := v.fetchLockDepositEvents(ctx, cursor)
+        
 				if err != nil {
 					log.Errorf("fetchLockDepositEvents failed:%v", err)
 					v.changeEndpoint()
 					sleep()
 					continue
 				}
+        
 				if enentsNum == 0 {
 					break
 				}
@@ -388,6 +393,7 @@ func (v *Voter) changeEndpoint() {
 	defer func() {
 		v.mutex.Unlock()
 	}()
+
 	if v.idx == len(v.clients)-1 {
 		v.idx = 0
 	} else {

@@ -95,6 +95,7 @@ func (w *BoltDB) GetSideSequence() uint64 {
 	_ = w.db.View(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(BKTHeight)
 		raw := bkt.Get([]byte("side_sequence"))
+
 		if len(raw) == 0 {
 			h = 0
 			return nil
