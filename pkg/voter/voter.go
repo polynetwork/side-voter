@@ -23,16 +23,16 @@ import (
 	"context"
 	"encoding/hex"
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"sync"
 	"time"
 
-	aptossdk "github.com/polynetwork/aptos-go-sdk/client"
-	"github.com/polynetwork/aptos-voter/config"
-	"github.com/polynetwork/aptos-voter/pkg/db"
-	"github.com/polynetwork/aptos-voter/pkg/log"
+	"github.com/block-vision/sui-go-sdk/models"
+	suisdk "github.com/block-vision/sui-go-sdk/sui"
+	"github.com/polynetwork/benfen-voter/config"
+	"github.com/polynetwork/benfen-voter/pkg/db"
+	"github.com/polynetwork/benfen-voter/pkg/log"
 	sdk "github.com/polynetwork/poly-go-sdk"
 	"github.com/polynetwork/poly/common"
 	"github.com/polynetwork/poly/core/types"
@@ -43,7 +43,7 @@ import (
 type Voter struct {
 	polySdk *sdk.PolySdk
 	signer  *sdk.Account
-	clients []aptossdk.AptosClient
+	clients []suisdk.ISuiAPI
 	conf    *config.Config
 	bdb     *db.BoltDB
 	idx     int
@@ -59,11 +59,12 @@ func (v *Voter) Init() (err error) {
 	if err != nil {
 		return
 	}
+
 	v.bdb = bdb
-	var clients []aptossdk.AptosClient
+	var clients []suisdk.ISuiAPI
 	for _, node := range v.conf.SideConfig.RestURL {
-		aptosSdk := aptossdk.NewAptosClient(node)
-		clients = append(clients, aptosSdk)
+		suiSdk := suisdk.NewSuiClient(node)
+		clients = append(clients, suiSdk)
 	}
 	v.clients = clients
 	return
@@ -81,6 +82,7 @@ func (v *Voter) StartReplenish(ctx context.Context) {
 		nextPolyHeight = uint64(h)
 		log.Infof("start from current poly height:%d", h)
 	}
+
 	ticker := time.NewTicker(time.Second)
 	for {
 		select {
@@ -138,6 +140,7 @@ func (v *Voter) StartReplenish(ctx context.Context) {
 				}
 				nextPolyHeight++
 			}
+
 		case <-ctx.Done():
 			log.Info("quiting from signal...")
 			return
@@ -146,10 +149,7 @@ func (v *Voter) StartReplenish(ctx context.Context) {
 }
 
 func (v *Voter) StartVoter(ctx context.Context) {
-	nextSequence := v.bdb.GetSideSequence()
-	if v.conf.ForceConfig.SideSequence > 0 {
-		nextSequence = v.conf.ForceConfig.SideSequence
-	}
+	cursor := v.bdb.GetSideEventCursor()
 	ticker := time.NewTicker(time.Second * 2)
 	for {
 		select {
@@ -160,22 +160,24 @@ func (v *Voter) StartVoter(ctx context.Context) {
 					return
 				default:
 				}
-				log.Infof("next aptos event sequence:%d", nextSequence)
+				log.Infof("next benfen event cursor:%s", cursor)
 				log.CheckRotateLogFile()
-				enentsNum, lastSequence, err := v.fetchLockDepositEvents(ctx, nextSequence)
+				enentsNum, lastDigest, err := v.fetchLockDepositEvents(ctx, cursor)
+        
 				if err != nil {
 					log.Errorf("fetchLockDepositEvents failed:%v", err)
 					v.changeEndpoint()
 					sleep()
 					continue
 				}
+        
 				if enentsNum == 0 {
 					break
 				}
-				log.Infof("aptos lastSequence: %v, nextSequence: %v", lastSequence, nextSequence)
-				if lastSequence > nextSequence {
-					nextSequence = lastSequence
-					err = v.bdb.UpdateSideSequence(nextSequence)
+				log.Infof("benfen lastDigest: %v, nextDigest: %v", lastDigest, cursor)
+				if lastDigest != "" && lastDigest != cursor {
+					cursor = lastDigest
+					err = v.bdb.UpdateSideEventCursor(cursor)
 					if err != nil {
 						log.Errorf("UpdateSideSequence failed:%v", err)
 					}
@@ -195,98 +197,124 @@ func (v *Voter) StartVoter(ctx context.Context) {
 	}
 }
 
-func (v *Voter) fetchLockDepositEvents(ctx context.Context, nextSequence uint64) (int, uint64, error) {
-	query := make(map[string]interface{})
-	query["limit"] = v.conf.SideConfig.Batch
-	query["start"] = nextSequence
-	events, err := v.clients[v.idx].GetEventsByCreationNumber(ctx, v.conf.SideConfig.CcmEventAddress, v.conf.SideConfig.CcmEventCreationNumber, query)
+func (v *Voter) fetchLockDepositEvents(ctx context.Context, cursor string) (int, string, error) {
+	eventRequest := models.SuiXQueryEventsRequest{
+		SuiEventFilter: models.EventFilterByMoveEventType{
+			MoveEventType: v.conf.SideConfig.CcmEventAddress + "::events::CrossChainEvent",
+		},
+		Limit: v.conf.SideConfig.Batch,
+	}
+	if cursor != "" {
+		eventRequest.Cursor = models.EventId{
+			TxDigest: cursor,
+			EventSeq: "0",
+		}
+	}
+	events, err := v.clients[v.idx].SuiXQueryEvents(ctx, eventRequest)
 	if err != nil {
-		log.Errorf("aptos GetEventsByCreatioNumber failed: %v", err)
-		return 0, 0, err
+		log.Errorf("benfen query event failed: %v", err)
+		return 0, "", err
 	}
-	log.Infof("aptos GetEventsByCreationNumber start: %v, limit: %v, len(events): %v", nextSequence, v.conf.SideConfig.Batch, len(events))
-	if len(events) == 0 {
-		return 0, 0, nil
+	log.Infof("benfen query event start: %v, limit: %v, len(events): %v", cursor, v.conf.SideConfig.Batch, len(events.Data))
+	if len(events.Data) == 0 {
+		return 0, "", nil
 	}
-	sort.Slice(events, func(i, j int) bool {
-		x, _ := strconv.Atoi(events[i].SequenceNumber)
-		y, _ := strconv.Atoi(events[j].SequenceNumber)
-		return x < y
-	})
 
-	for _, event := range events {
-		nowSequence, _ := strconv.Atoi(event.SequenceNumber)
-		if strings.EqualFold(strings.TrimPrefix(event.GUID.AccountAddress, "0x"), strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")) &&
-			strings.EqualFold(event.GUID.CreationNumber, v.conf.SideConfig.CcmEventCreationNumber) {
-
-			nextSequence = uint64(nowSequence + 1)
+	for _, event := range events.Data {
+		cursor = event.Id.TxDigest
+		if strings.EqualFold(event.PackageId[3:67], strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")) {
 
 			param := &common2.MakeTxParam{}
-			raw_data, ok := event.Data["raw_data"]
+			raw_data, ok := event.ParsedJson["raw_data"]
 			if !ok {
-				log.Errorf("no rawdata in event.Data, version: %s, eventsequence: %s", event.Version, event.SequenceNumber)
+				log.Errorf("no rawdata in event.ParsedJson, digest: %s", event.Id.TxDigest)
 				continue
 			}
-			rawData, err := hex.DecodeString(raw_data.(string)[2:])
-			if err != nil {
-				log.Errorf("rawdata DecodeString rawData err: %v, version: %s, eventsequence: %s", err, event.Version, event.SequenceNumber)
+			data, ok := raw_data.([]interface{})
+			if !ok {
+				log.Errorf("rawdata type error in event.ParsedJson, digest: %s", event.Id.TxDigest)
 				continue
+			}
+			rawData := make([]byte, len(data))
+			for i, v := range data {
+				rawData[i] = uint8(v.(float64))
 			}
 
 			_ = param.Deserialization(common.NewZeroCopySource(rawData))
 			if !v.conf.IsWhitelistMethod(param.Method) {
-				log.Errorf("target contract method invalid %s, version: %s, eventsequence: %s", param.Method, event.Version, event.SequenceNumber)
+				log.Errorf("target contract method invalid %s, digest: %s", param.Method, event.Id.TxDigest)
 				continue
 			}
 
 			raw, _ := v.polySdk.GetStorage(autils.CrossChainManagerContractAddress.ToHexString(),
 				append(append([]byte(common2.DONE_TX), autils.GetUint64Bytes(v.conf.SideConfig.SideChainId)...), param.CrossChainID...))
 			if len(raw) != 0 {
-				log.Infof("StartVoter - ccid %s (version: %s, eventsequence: %s) already on poly",
-					hex.EncodeToString(param.CrossChainID), event.Version, event.SequenceNumber)
+				log.Infof("StartVoter - ccid %s (digest: %s) already on poly",
+					hex.EncodeToString(param.CrossChainID), event.Id.TxDigest)
 				continue
 			}
 
+			tx, err := v.clients[v.idx].SuiGetTransactionBlock(ctx, models.SuiGetTransactionBlockRequest{
+				Digest: cursor,
+				Options: models.SuiTransactionBlockOptions{
+					ShowEffects: true,
+				},
+			})
+			if err != nil {
+				return len(events.Data), event.Id.TxDigest, err
+			}
 			//version -> tx, height -> block
-			version, err := strconv.Atoi(event.Version)
+			checkpoint, err := strconv.Atoi(tx.Checkpoint)
 			if err != nil {
-				log.Errorf("tx version err: %v, version: %s, txid: %v", err, event.Version, hex.EncodeToString(param.CrossChainID))
-				continue
+				log.Errorf("tx checkpoint err: %v, digest: %v", err)
+				return 0, "", nil
 			}
 
-			txHash, err := v.commitVote(uint32(version), rawData, param.TxHash)
+			txHash, err := v.commitVote(uint32(checkpoint), rawData, param.TxHash)
 			if err != nil {
-				log.Errorf("commitVote failed:%v, version: %s, txid: %v", err, event.Version, hex.EncodeToString(param.CrossChainID))
-				return len(events), uint64(nowSequence), err
+				log.Errorf("commitVote failed:%v, txid: %v", err, event.Id.TxDigest)
+				return len(events.Data), event.Id.TxDigest, err
 			}
 			err = v.waitTx(txHash)
 			if err != nil {
 				log.Errorf("waitTx failed:%v", err)
-				return len(events), uint64(nowSequence), err
+				return len(events.Data), event.Id.TxDigest, err
 			}
 		}
 	}
-	return len(events), nextSequence, nil
+	return len(events.Data), cursor, nil
 }
 
 func (v *Voter) fetchLockDepositEventByTxHash(ctx context.Context, txHash string) error {
-	tx, err := v.clients[v.idx].GetTransactionByHash(ctx, txHash)
+	tx, err := v.clients[v.idx].SuiGetTransactionBlock(ctx, models.SuiGetTransactionBlockRequest{
+		Digest: txHash,
+		Options: models.SuiTransactionBlockOptions{
+			ShowEffects: true,
+			ShowEvents:  true,
+		},
+	})
 	if err != nil {
 		return fmt.Errorf("fetchLockDepositEventByTxHash, cannot get tx: %s info, err: %s", txHash, err)
 	}
 	for _, event := range tx.Events {
-		if strings.EqualFold(strings.TrimPrefix(event.GUID.AccountAddress, "0x"), strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")) &&
-			strings.EqualFold(event.GUID.CreationNumber, v.conf.SideConfig.CcmEventCreationNumber) {
+		if strings.EqualFold(strings.TrimPrefix(event.PackageId, "0x"), strings.TrimPrefix(v.conf.SideConfig.CcmEventAddress, "0x")) {
 			param := &common2.MakeTxParam{}
-			raw_data, ok := event.Data["raw_data"]
-			if !ok {
-				log.Errorf("no rawdata in event.Data, version: %s, eventsequence: %s", event.Version, event.SequenceNumber)
+			if event.Type != v.conf.SideConfig.CcmEventAddress+"::events::CrossChainEvent" {
 				continue
 			}
-			rawData, err := hex.DecodeString(raw_data.(string)[2:])
-			if err != nil {
-				log.Errorf("rawdata DecodeString err: %v, version: %s, eventsequence: %s", err, event.Version, event.SequenceNumber)
+			raw_data, ok := event.ParsedJson["raw_data"]
+			if !ok {
+				log.Errorf("no rawdata in event.ParsedJson, digest: %s", event.Id.TxDigest)
 				continue
+			}
+			data, ok := raw_data.([]interface{})
+			if !ok {
+				log.Errorf("rawdata type error in event.ParsedJson, digest: %s", event.Id.TxDigest)
+				continue
+			}
+			rawData := make([]byte, len(data))
+			for i, v := range data {
+				rawData[i] = uint8(v.(float64))
 			}
 
 			_ = param.Deserialization(common.NewZeroCopySource(rawData))
@@ -304,12 +332,12 @@ func (v *Voter) fetchLockDepositEventByTxHash(ctx context.Context, txHash string
 			}
 
 			//version -> tx, height -> block
-			version, err := strconv.Atoi(tx.Version)
+			checkpoint, err := strconv.Atoi(tx.Checkpoint)
 			if err != nil {
-				log.Errorf("tx version err: %v, txHash: %s", err, txHash)
+				log.Errorf("tx checkpoint err: %v, txHash: %s", err, txHash)
 				continue
 			}
-			txHash, err = v.commitVote(uint32(version), rawData, param.TxHash)
+			txHash, err = v.commitVote(uint32(checkpoint), rawData, param.TxHash)
 			if err != nil {
 				log.Errorf("commitVote failed:%v", err)
 				continue
@@ -320,12 +348,12 @@ func (v *Voter) fetchLockDepositEventByTxHash(ctx context.Context, txHash string
 	return nil
 }
 
-func (v *Voter) commitVote(version uint32, value []byte, txid []byte) (string, error) {
-	log.Infof("commitVote, version: %d, value: %s, txid: %s", version, hex.EncodeToString(value), hex.EncodeToString(txid))
+func (v *Voter) commitVote(checkpoint uint32, value []byte, txid []byte) (string, error) {
+	log.Infof("commitVote, checkpoint: %d, value: %s, txid: %s", checkpoint, hex.EncodeToString(value), hex.EncodeToString(txid))
 	tx, err := v.polySdk.Native.Ccm.ImportOuterTransfer(
 		v.conf.SideConfig.SideChainId,
 		value,
-		version,
+		checkpoint,
 		nil,
 		v.signer.Address[:],
 		[]byte{},
@@ -334,7 +362,7 @@ func (v *Voter) commitVote(version uint32, value []byte, txid []byte) (string, e
 		return "", err
 	} else {
 		log.Infof("commitVote - send transaction to poly chain: ( poly_txhash: %s, side_txid: %s, side_version: %d )",
-			tx.ToHexString(), hex.EncodeToString(txid), version)
+			tx.ToHexString(), hex.EncodeToString(txid), checkpoint)
 		return tx.ToHexString(), nil
 	}
 }
@@ -365,6 +393,7 @@ func (v *Voter) changeEndpoint() {
 	defer func() {
 		v.mutex.Unlock()
 	}()
+
 	if v.idx == len(v.clients)-1 {
 		v.idx = 0
 	} else {

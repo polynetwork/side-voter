@@ -68,12 +68,34 @@ func (w *BoltDB) UpdateSideSequence(h uint64) error {
 	})
 }
 
+func (w *BoltDB) UpdateSideEventCursor(cursor string) error {
+	return w.db.Update(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(BKTHeight)
+		return bkt.Put([]byte("side_event_cursor"), []byte(cursor))
+	})
+}
+
+func (w *BoltDB) GetSideEventCursor() string {
+	cursor := ""
+	_ = w.db.View(func(tx *bolt.Tx) error {
+		bkt := tx.Bucket(BKTHeight)
+		raw := bkt.Get([]byte("side_event_cursor"))
+		if len(raw) == 0 {
+			return nil
+		}
+		cursor = string(raw)
+		return nil
+	})
+	return cursor
+}
+
 func (w *BoltDB) GetSideSequence() uint64 {
 
 	var h uint64
 	_ = w.db.View(func(tx *bolt.Tx) error {
 		bkt := tx.Bucket(BKTHeight)
 		raw := bkt.Get([]byte("side_sequence"))
+
 		if len(raw) == 0 {
 			h = 0
 			return nil

@@ -28,9 +28,9 @@ import (
 	"time"
 
 	"github.com/howeyc/gopass"
-	"github.com/polynetwork/aptos-voter/config"
-	"github.com/polynetwork/aptos-voter/pkg/log"
-	"github.com/polynetwork/aptos-voter/pkg/voter"
+	"github.com/polynetwork/benfen-voter/config"
+	"github.com/polynetwork/benfen-voter/pkg/log"
+	"github.com/polynetwork/benfen-voter/pkg/voter"
 	sdk "github.com/polynetwork/poly-go-sdk"
 )
 
